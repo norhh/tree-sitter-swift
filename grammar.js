@@ -808,7 +808,7 @@ module.exports = grammar({
         $._basic_literal,
         $.lambda_literal,
         $._special_literal,
-        $._playground_literal,
+        $.playground_literal,
         $.array_literal,
         $.dictionary_literal,
         $.self_expression,
@@ -864,7 +864,10 @@ module.exports = grammar({
         "#function",
         "#dsohandle"
       ),
-    _playground_literal: ($) =>
+    // Keep recursive literal arguments behind a visible node. A hidden rule here
+    // lets query analysis recurse from _expression back into _expression while
+    // enumerating siblings, even in queries that never mention a playground literal.
+    playground_literal: ($) =>
       seq(
         choice("#colorLiteral", "#fileLiteral", "#imageLiteral"),
         "(",

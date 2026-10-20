@@ -1,128 +1,147 @@
-![Parse rate badge](https://byob.yarr.is/alex-pinkus/tree-sitter-swift/parse_rate)
-[![Crates.io badge](https://byob.yarr.is/alex-pinkus/tree-sitter-swift/crates_io_version)](https://crates.io/crates/tree-sitter-swift)
-[![NPM badge](https://byob.yarr.is/alex-pinkus/tree-sitter-swift/npm_version)](https://www.npmjs.com/package/tree-sitter-swift)
-[![Build](https://github.com/alex-pinkus/tree-sitter-swift/actions/workflows/top-repos.yml/badge.svg)](https://github.com/alex-pinkus/tree-sitter-swift/actions/workflows/top-repos.yml)
+# Optimized Swift grammar for Tree-sitter
 
-# tree-sitter-swift
+**This is a query-optimized Swift grammar**, designed to make Tree-sitter query
+compilation dramatically faster while keeping existing queries compatible.
+It is particularly useful for Swift/iOS code transformations with
+[Piranha](https://github.com/uber/piranha).
 
-This contains a [`tree-sitter`](https://tree-sitter.github.io/tree-sitter) grammar for the Swift programming language.
+This fork preserves the history and fixes of
+[`satyam1749/tree-sitter-swift`](https://github.com/satyam1749/tree-sitter-swift),
+based on commit `08a28993599f1968bc81631a89690503e1db7704` (version 0.3.6).
+The original grammar is by
+[Alex Pinkus and contributors](https://github.com/alex-pinkus/tree-sitter-swift).
+This is an independently maintained fork, not an official upstream release.
 
-## Getting started
+## Performance
 
-To use this parser to parse Swift code, you'll want to depend on either the Rust crate or the NPM package.
+Piranha's Swift slowdown was primarily in **query compilation (`Query::new`)**,
+not in finding matches in an already-parsed file.
 
-### Rust
+Local measurements on October 20, 2026, using an Apple M3 Max, release builds,
+Tree-sitter 0.20.10, and three samples per query:
 
-To use the Rust crate, you'll add this to your `Cargo.toml`:
+| Cold query compilation | Original grammar | Optimized grammar | Speedup |
+| --- | ---: | ---: | ---: |
+| 105 unchanged Piranha rule/filter/scope queries, sum of medians | 143.891 s | 2.897 s | **49.7×** |
+| Conjunction cleanup query | 2.313 s | 21.2 ms | 109× |
+| Literal equality cleanup query | 23.242 s | 15.3 ms | 1,521× |
+| Function scope query | 13.524 s | 593.6 ms | 22.8× |
 
+These are workload- and machine-specific results, not latency guarantees.
+Capture names, node kinds, ranges, and ordering agreed across both grammars on
+the benchmark fixture. No shipped Piranha queries were changed.
+
+## What is optimized?
+
+The old grammar contained an entirely hidden recursive path:
+
+```text
+_expression → _primary_expression → _playground_literal
+    → argument list → _expression → …
 ```
-tree-sitter = "0.20.4"
-tree-sitter-swift = "=0.3.6"
+
+Tree-sitter flattens hidden nodes. Consequently, query analysis could enumerate
+millions of states through nested playground-literal arguments, even for queries
+that never mentioned a playground literal.
+
+This fork makes **`playground_literal` a visible, named node**. That boundary
+stops the expensive sibling expansion. The LR parser still has **6,567 states**,
+the same as before; this fix does not require a parser-state reduction, query
+serialization, or changes to the Tree-sitter runtime.
+
+The scanner, grammar precedence, conflicts, and optional-chain rules are
+unchanged.
+
+## Query compatibility
+
+All existing public node kinds and field names are retained. Ordinary
+expressions, optional chains, calls, types, function parameters, and literals
+keep their existing tree shapes.
+
+The only intentional tree-shape change is for:
+
+- `#imageLiteral(...)`
+- `#fileLiteral(...)`
+- `#colorLiteral(...)`
+
+These now produce a single `playground_literal` expression rather than
+flattening their argument labels and values into the enclosing node:
+
+```scheme
+; Before
+(property_declaration
+  (simple_identifier)
+  (line_string_literal))
+
+; Optimized grammar
+(property_declaration
+  value: (playground_literal
+    (simple_identifier)
+    (line_string_literal)))
 ```
 
-Then you can use a `tree-sitter` parser with the language declared here:
+Queries that specifically rely on flattened playground arguments should descend
+into `playground_literal`. Queries that find an argument anywhere in a subtree
+still work. The new boundary also prevents literal-expression queries from
+mistaking playground arguments for sibling operands.
 
+## Rust usage
+
+Use a pinned commit from this repository for reproducible builds:
+
+```toml
+[dependencies]
+tree-sitter = "0.20.10"
+tree-sitter-swift = { git = "https://github.com/norhh/tree-sitter-swift", branch = "optimized-query-performance" }
 ```
+
+Replace `branch` with `rev = "<commit SHA>"` when integrating into an application.
+
+```rust
 let mut parser = tree_sitter::Parser::new();
-parser.set_language(tree_sitter_swift::language())?;
-
-// ...
-
-let tree = parser.parse(&my_source_code, None)
-    .ok_or_else(|| /* error handling code */)?;
+parser.set_language(tree_sitter_swift::language()).unwrap();
+let tree = parser.parse("let enabled = true", None).unwrap();
+assert!(!tree.root_node().has_error());
 ```
 
-### Javascript
+This fork retains the Tree-sitter 0.20 Rust API and ABI-14 grammar.
 
-To use this from NPM, you'll add similar dependencies to `package.json`:
+## Tests and a small compilation benchmark
 
-```
-"dependencies: {
-  "tree-sitter-swift": "0.3.6",
-  "tree-sitter": "^0.20.0"
-}
+```sh
+cargo test
+cargo run --release --example query_compile
 ```
 
-Your usage of the parser will look like:
+The example measures three representative queries independently of parsing and
+matching. It is a small reproduction, not the full 105-query Piranha workload.
 
-```
-const Parser = require("tree-sitter");
-const Swift = require("tree-sitter-swift");
+The original **178-case grammar corpus** is retained. Only the expected
+playground-literal tree is updated. The corpus also runs through `cargo test`,
+without requiring the Tree-sitter CLI. Additional tests cover nested playground
+literals and literal-query behavior.
 
-const parser = new Parser();
-parser.setLanguage(Swift);
+The grammar was also validated against all 11 Piranha Swift rewrite tests, which
+completed in about 33 seconds in a debug build, including eight formerly ignored
+tests.
 
-// ...
+## Regenerating the parser
 
-const tree = parser.parse(mySourceCode);
-```
+Generated sources are checked in, so normal Rust builds need a C compiler but
+do not need Node or the Tree-sitter CLI.
 
-### Editing the grammar
+To reproduce this fork's generated sources:
 
-With this package checked out, a common workflow for editing the grammar will look something like:
-
-1. Make a change to `grammar.ts`.
-2. Run `npm install && npm test` to see whether the change has had impact on existing parsing behavior. The default
-   `npm test` target requires `valgrind` to be installed; if you do not have it installed, and do not wish to, you can
-   substitute `tree-sitter test` directly.
-3. Run `tree-sitter parse` on some real Swift codebase and see whether (or where) it fails.
-4. Use any failures to create new corpus test cases.
-
-## Contributions
-
-If you have a change to make to this parser, and the change is a net positive, please submit a pull request. I mostly
-started this parser to teach myself how `tree-sitter` works, and how to write a grammar, so I welcome improvements. If
-you have an issue with the parser, please file a bug and include a test case to put in the `corpus`. I can't promise any
-level of support, but having the test case makes it more likely that I want to tinker with it.
-
-## Using tree-sitter-swift in Web Assembly
-
-To use tree-sitter-swift as a language for the web bindings version tree-sitter, which will likely be a more modern version than the published node
-module. [see](https://github.com/tree-sitter/tree-sitter/blob/master/lib/binding_web/README.md). Follow the instructions below
-
-1. Install the node modules `npm install web-tree-sitter tree-sitter-swift`
-2. Run the tree-sitter cli to create the wasm bundle
-   ```sh
-   $ npx tree-sitter build-asm ./node_modules/tree-sitter
-   ```
-3. Boot tree-sitter wasm like this.
-
-```js
-const Parser = require("web-tree-sitter");
-async function run() {
-  //needs to happen first
-  await Parser.init();
-  //wait for the load of swift
-  const Swift = await Parser.Language.load("./tree-sitter-swift.wasm");
-
-  const parser = new Parser();
-  parser.setLanguage(Swift);
-
-  //Parse your swift code here.
-  const tree = parser.parse('print("Hello, World!")');
-}
-//if you want to run this
-run().then(console.log, console.error);
+```sh
+cargo install tree-sitter-cli --version 0.20.8 --locked
+tree-sitter generate --no-bindings
+tree-sitter test
 ```
 
-## Frequently asked questions
+The existing Node bindings and upstream tooling are retained. Their package
+metadata still uses the original package name; this repository does not claim
+to publish or replace the upstream npm package.
 
-### Where is your `parser.c`?
+## License
 
-This repository currently omits most of the code that is autogenerated during a build. This means, for instance, that
-`grammar.json` and `parser.c` are both only available following a build. It also significantly reduces noise during
-diffs.
-
-The side benefit of not checking in `parser.c` is that you can guarantee backwards compatibility. Parsers generated by
-the tree-sitter CLI aren't always backwards compatible. If you need a parser, generate it yourself using the CLI; all
-the information to do so is available in this package. By doing that, you'll also know for sure that your parser version
-and your library version are compatible.
-
-If you need a `parser.c`, and you don't care about the tree-sitter version, but you don't have a local setup that would
-allow you to obtain the parser, you can just download one from a recent workflow run in this package. To do so:
-
-- Go to the [GitHub actions page](https://github.com/alex-pinkus/tree-sitter-swift/actions) for this
-  repository.
-- Click on the "Publish `grammar.json` and `parser.c`" action for the appropriate commit.
-- Go down to `Artifacts` and click on `generated-parser-src`. All the relevant parser files will be available in your
-  download.
+MIT. See [LICENSE](LICENSE). Original attribution is preserved.

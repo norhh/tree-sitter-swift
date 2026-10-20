@@ -3024,7 +3024,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "_playground_literal"
+          "name": "playground_literal"
         },
         {
           "type": "SYMBOL",
@@ -3370,7 +3370,7 @@
         }
       ]
     },
-    "_playground_literal": {
+    "playground_literal": {
       "type": "SEQ",
       "members": [
         {
