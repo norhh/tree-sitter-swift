@@ -1081,6 +1081,8 @@ module.exports = grammar({
           "dsohandle"
         )
       ),
+    // Keep recursive literal arguments behind a visible node. Hiding this rule
+    // lets query analysis expand nested arguments as siblings of expressions.
     playground_literal: ($) =>
       seq(
         $._hash_symbol,
